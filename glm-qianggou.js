@@ -379,7 +379,29 @@
       return false;
     }
     console.log("[OCR] 点击验证码确认按钮");
-    return dispatchRealClick(confirmBtn);
+    try {
+      confirmBtn.scrollIntoView({
+        block: "center",
+        inline: "center",
+        behavior: "auto",
+      });
+    } catch {}
+    try {
+      confirmBtn.focus({ preventScroll: true });
+    } catch {}
+    const rect = confirmBtn.getBoundingClientRect();
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: unsafeWindow,
+      clientX: rect.left + Math.max(1, rect.width / 2),
+      clientY: rect.top + Math.max(1, rect.height / 2),
+    };
+    ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach(
+      (type) => dispatchMouseLikeEvent(confirmBtn, type, eventInit),
+    );
+    return true;
   }
 
   function buildCaptchaFingerprint(imgUrl, targets) {
@@ -1237,7 +1259,7 @@
     panel.id = "glm-simple-panel-v16";
     panel.innerHTML = `
       <div class="glm-simple-head-v16">
-         <div class="glm-simple-title-v16">GLM 抢购助手 <span class="glm-simple-badge-v16">v1.7 ddddocr</span></div>
+         <div class="glm-simple-title-v16">GLM 抢购助手 <span class="glm-simple-badge-v16">v1.6</span></div>
       </div>
       <div class="glm-simple-body-v16">
         <div class="glm-simple-row-v16">
