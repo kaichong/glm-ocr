@@ -4,10 +4,8 @@
 // @version      1.8
 // @description  准点自动点击指定套餐，支持时间自动校准（优先网站时间，失败则NTP），绕过限流，支持验证码等待与异常弹窗检测自动重试，并接入 ddddocr 点击验证码识别。
 // @author       Codex
-// @match        *://bigmodel.cn/glm-coding*
-// @match        https://www.bigmodel.cn/glm-coding
-// @match        *://bigmodel.cn/usercenter/glm-coding*
-// @match        *://bigmodel.cn/html/rate-limit.html*
+// @match        *://bigmodel.cn/*
+// @match        https://*.bigmodel.cn/*
 // @run-at       document-end
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
