@@ -162,7 +162,11 @@ def enrich_log_record(item: dict) -> dict:
 
 
 def build_logs_view_html() -> str:
-    return """<!doctype html>
+    event_options = "".join(
+        f'<option value="{k}">{v}</option>'
+        for k, v in EVENT_LABELS.items()
+    )
+    html_body = '''<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -198,7 +202,10 @@ def build_logs_view_html() -> str:
     <div class="toolbar">
       <input id="account" placeholder="账号">
       <input id="session_id" placeholder="窗口标识 (账号-随机数)">
-      <input id="event_type" placeholder="事件类型，例如 watch_start">
+      <select id="event_type">
+        <option value="">全部事件</option>
+        ''' + event_options + '''
+      </select>
       <input id="keyword" placeholder="关键字">
       <select id="limit">
         <option value="100">最近 100 条</option>
@@ -232,6 +239,17 @@ def build_logs_view_html() -> str:
     </div>
   </div>
   <script>
+    function formatTimestamp(isoString) {
+      if (!isoString) return '';
+      try {
+        const date = new Date(isoString);
+        const pad = (n, len = 2) => String(n).padStart(len, '0');
+        return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) + ' ' + pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
+      } catch (e) {
+        return isoString;
+      }
+    }
+
     const els = {
       account: document.getElementById("account"),
       session_id: document.getElementById("session_id"),
@@ -275,14 +293,12 @@ def build_logs_view_html() -> str:
 
       payload.items.forEach((item) => {
         const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td>${item.ts || ""}</td>
-          <td>${item.account || ""}</td>
-          <td><span class="pill">${item.session_id || ""}</span></td>
-          <td>${item.source || ""}</td>
-          <td><div>${item.event_label || item.event_type || ""}</div><div style="color:#7b8798;font-size:12px;">${item.event_type || ""}</div></td>
-          <td>${summary(item)}</td>
-        `;
+        tr.innerHTML = '<td>' + formatTimestamp(item.ts) + '</td>' +
+          '<td>' + (item.account || "") + '</td>' +
+          '<td><span class="pill">' + (item.session_id || "") + '</span></td>' +
+          '<td>' + (item.source || "") + '</td>' +
+          '<td><div>' + (item.event_label || item.event_type || "") + '</div><div style="color:#7b8798;font-size:12px;">' + (item.event_type || "") + '</div></td>' +
+          '<td>' + summary(item) + '</td>';
         tr.addEventListener("click", () => {
           els.detail.textContent = JSON.stringify(item, null, 2);
         });
@@ -295,7 +311,8 @@ def build_logs_view_html() -> str:
     setInterval(loadLogs, 2000);
   </script>
 </body>
-</html>"""
+</html>'''
+    return html_body
 
 
 def decode_base64_image(image_b64: str) -> bytes:
