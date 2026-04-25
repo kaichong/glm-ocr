@@ -4,8 +4,10 @@ import json
 import os
 import time
 from collections import Counter
+from datetime import datetime
+from threading import Lock
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 from PIL import Image, ImageFilter, ImageOps
 import ddddocr
 
@@ -14,6 +16,24 @@ HOST = os.environ.get("OCR_HOST", "127.0.0.1")
 PORT = int(os.environ.get("OCR_PORT", "5000"))
 SAVE_DEBUG = os.environ.get("OCR_SAVE_DEBUG", "0") == "1"
 DEBUG_DIR = os.environ.get("OCR_DEBUG_DIR", os.path.join(os.getcwd(), "ocr_debug"))
+LOG_DIR = os.environ.get("OCR_LOG_DIR", os.path.join(os.getcwd(), "logs"))
+EVENT_LABELS = {
+    "page_enter": "进入页面",
+    "watch_start": "开始监听",
+    "captcha_detected": "检测到验证码",
+    "ocr_request": "发起 OCR 请求",
+    "ocr_success": "OCR 识别成功",
+    "ocr_failure": "OCR 识别失败",
+    "ocr_result_received": "收到 OCR 结果",
+    "ocr_result_not_3": "OCR 结果不是 3 个字",
+    "ocr_submit": "提交验证码",
+    "ocr_request_failed": "OCR 请求失败",
+    "dialog_busy": "购买人数较多弹窗",
+    "dialog_empty_price": "空价格弹窗",
+    "dialog_confirm_pay": "确认支付弹窗",
+    "dialog_qr_pay": "二维码支付弹窗",
+    "purchase_completed": "进入支付流程",
+}
 BOX_PADDING = int(os.environ.get("OCR_BOX_PADDING", "8"))
 UPSCALE = float(os.environ.get("OCR_UPSCALE", "2.5"))
 ROW_MERGE_THRESHOLD = int(os.environ.get("OCR_ROW_MERGE_THRESHOLD", "18"))
@@ -39,11 +59,243 @@ FAST_UPSCALE_CANDIDATES = [
 ]
 
 app = Flask(__name__)
+LOG_LOCK = Lock()
 
 # 整图检测
 detector = ddddocr.DdddOcr(det=True, ocr=False, show_ad=False)
 # 单字识别：不能把 ocr 关掉，否则 classification() 会直接报“OCR功能未初始化”
 classifier = ddddocr.DdddOcr(beta=True, show_ad=False)
+
+
+def ensure_log_dir():
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+
+def get_log_file_path(now: datetime | None = None) -> str:
+    current = now or datetime.now().astimezone()
+    return os.path.join(LOG_DIR, f"{current:%Y-%m-%d}-events.jsonl")
+
+
+def append_jsonl_record(record: dict):
+    ensure_log_dir()
+    log_path = get_log_file_path()
+    line = json.dumps(record, ensure_ascii=False)
+    with LOG_LOCK:
+        with open(log_path, "a", encoding="utf-8") as file:
+            file.write(line + "\n")
+
+
+def emit_event(
+    source: str,
+    event_type: str,
+    *,
+    account: str = "",
+    session_id: str = "",
+    page_url: str = "",
+    detail: dict | None = None,
+):
+    record = {
+        "ts": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+        "source": source,
+        "event_type": event_type,
+        "account": account or "",
+        "session_id": session_id or "",
+        "page_url": page_url or "",
+        "detail": detail if isinstance(detail, dict) else {},
+    }
+    append_jsonl_record(record)
+    return record
+
+
+def read_log_records() -> list[dict]:
+    if not os.path.isdir(LOG_DIR):
+        return []
+
+    records = []
+    for entry in sorted(os.listdir(LOG_DIR), reverse=True):
+        if not entry.endswith(".jsonl"):
+            continue
+        path = os.path.join(LOG_DIR, entry)
+        with open(path, "r", encoding="utf-8") as file:
+            for line in file:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    return records
+
+
+def filter_log_records(records: list[dict], args) -> list[dict]:
+    account = str(args.get("account") or "").strip()
+    session_id = str(args.get("session_id") or "").strip()
+    event_type = str(args.get("event_type") or "").strip()
+    keyword = str(args.get("keyword") or "").strip().lower()
+    limit = max(1, min(1000, int(args.get("limit") or 200)))
+
+    filtered = []
+    for item in records:
+        if account and item.get("account") != account:
+            continue
+        if session_id and item.get("session_id") != session_id:
+            continue
+        if event_type and item.get("event_type") != event_type:
+            continue
+        if keyword:
+            haystack = json.dumps(item, ensure_ascii=False).lower()
+            if keyword not in haystack:
+                continue
+        filtered.append(item)
+
+    return filtered[-limit:]
+
+
+def enrich_log_record(item: dict) -> dict:
+    enriched = dict(item)
+    enriched["event_label"] = EVENT_LABELS.get(
+        enriched.get("event_type") or "",
+        enriched.get("event_type") or "未知事件",
+    )
+    return enriched
+
+
+def build_logs_view_html() -> str:
+    return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GLM OCR Logs</title>
+  <style>
+    :root { color-scheme: light; font-family: "Segoe UI", "PingFang SC", sans-serif; }
+    body { margin: 0; background: #f4f7fb; color: #172033; }
+    .app { max-width: 1400px; margin: 0 auto; padding: 20px; }
+    .toolbar { display: grid; grid-template-columns: 1.2fr 1.2fr 1fr 1fr auto auto; gap: 12px; margin-bottom: 16px; }
+    input, select, button { border: 1px solid #c8d2e1; border-radius: 8px; padding: 10px 12px; font-size: 14px; background: #fff; }
+    button { cursor: pointer; background: #2563eb; color: #fff; border: none; }
+    .meta { display: flex; gap: 16px; margin-bottom: 12px; font-size: 13px; color: #51607a; }
+    .layout { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; min-height: 70vh; }
+    .panel { background: #fff; border-radius: 10px; box-shadow: 0 12px 30px rgba(16, 24, 40, 0.08); overflow: hidden; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #edf1f7; font-size: 13px; text-align: left; vertical-align: top; }
+    th { background: #f9fbff; position: sticky; top: 0; }
+    tbody tr:hover { background: #f7faff; cursor: pointer; }
+    .detail { padding: 14px; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; line-height: 1.5; }
+    .pill { display: inline-block; border-radius: 999px; padding: 2px 8px; background: #e8efff; color: #24479a; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <h1>GLM OCR Logs</h1>
+    <div class="meta">
+      <span>接口: <code>/logs/events</code></span>
+      <span id="status">加载中...</span>
+      <span>常见事件: 开始监听 / 检测到验证码 / 收到 OCR 结果 / 二维码支付弹窗 / 进入支付流程</span>
+    </div>
+    <div class="toolbar">
+      <input id="account" placeholder="账号">
+      <input id="session_id" placeholder="窗口标识 (账号-随机数)">
+      <input id="event_type" placeholder="事件类型，例如 watch_start">
+      <input id="keyword" placeholder="关键字">
+      <select id="limit">
+        <option value="100">最近 100 条</option>
+        <option value="200" selected>最近 200 条</option>
+        <option value="500">最近 500 条</option>
+      </select>
+      <button id="refresh">刷新</button>
+    </div>
+    <div class="layout">
+      <div class="panel">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>账号</th>
+              <th>窗口</th>
+              <th>来源</th>
+              <th>事件</th>
+              <th>摘要</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div class="panel">
+        <div class="detail">
+          <h3>日志详情</h3>
+          <pre id="detail">点击左侧某条日志查看完整 JSON</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const els = {
+      account: document.getElementById("account"),
+      session_id: document.getElementById("session_id"),
+      event_type: document.getElementById("event_type"),
+      keyword: document.getElementById("keyword"),
+      limit: document.getElementById("limit"),
+      refresh: document.getElementById("refresh"),
+      rows: document.getElementById("rows"),
+      detail: document.getElementById("detail"),
+      status: document.getElementById("status"),
+    };
+
+    function summary(item) {
+      const detail = item.detail || {};
+      const parts = [];
+      if (detail.plan) parts.push("套餐=" + detail.plan);
+      if (detail.targetTime) parts.push("时间=" + detail.targetTime);
+      if (typeof detail.click_count === "number") parts.push("点击点数=" + detail.click_count);
+      if (typeof detail.clickPointCount === "number") parts.push("识别点数=" + detail.clickPointCount);
+      if (detail.dialogType) parts.push("弹窗=" + detail.dialogType);
+      if (detail.hasQrCode === true) parts.push("二维码=是");
+      if (detail.hasQrCode === false) parts.push("二维码=否");
+      return parts.join(" | ");
+    }
+
+    function queryString() {
+      const params = new URLSearchParams();
+      ["account", "session_id", "event_type", "keyword", "limit"].forEach((key) => {
+        const value = els[key].value.trim();
+        if (value) params.set(key, value);
+      });
+      return params.toString();
+    }
+
+    async function loadLogs() {
+      const url = "/logs/events?" + queryString();
+      const response = await fetch(url);
+      const payload = await response.json();
+      els.rows.innerHTML = "";
+      els.status.textContent = "共 " + payload.count + " 条";
+
+      payload.items.forEach((item) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${item.ts || ""}</td>
+          <td>${item.account || ""}</td>
+          <td><span class="pill">${item.session_id || ""}</span></td>
+          <td>${item.source || ""}</td>
+          <td><div>${item.event_label || item.event_type || ""}</div><div style="color:#7b8798;font-size:12px;">${item.event_type || ""}</div></td>
+          <td>${summary(item)}</td>
+        `;
+        tr.addEventListener("click", () => {
+          els.detail.textContent = JSON.stringify(item, null, 2);
+        });
+        els.rows.appendChild(tr);
+      });
+    }
+
+    els.refresh.addEventListener("click", loadLogs);
+    loadLogs();
+    setInterval(loadLogs, 2000);
+  </script>
+</body>
+</html>"""
 
 
 def decode_base64_image(image_b64: str) -> bytes:
@@ -668,15 +920,60 @@ def detect_characters(image_bytes: bytes, targets: list[str]):
     }
 
 
+@app.post("/log/event")
+def log_event():
+    payload = request.get_json(force=True, silent=False) or {}
+    event_type = str(payload.get("event_type") or "").strip()
+    if not event_type:
+        return jsonify({"success": False, "code": -1, "message": "缺少 event_type"}), 400
+
+    record = emit_event(
+        "userscript",
+        event_type,
+        account=str(payload.get("account") or "").strip(),
+        session_id=str(payload.get("session_id") or "").strip(),
+        page_url=str(payload.get("page_url") or "").strip(),
+        detail=payload.get("detail") if isinstance(payload.get("detail"), dict) else {},
+    )
+    return jsonify({"success": True, "event": record})
+
+
+@app.get("/logs/events")
+def logs_events():
+    records = read_log_records()
+    items = [enrich_log_record(item) for item in filter_log_records(records, request.args)]
+    return jsonify({"success": True, "count": len(items), "items": items})
+
+
+@app.get("/logs/view")
+def logs_view():
+    return Response(build_logs_view_html(), mimetype="text/html")
+
+
 @app.post("/ocr/click")
 def ocr_click():
     started_at = time.time()
+    account = ""
+    session_id = ""
+    page_url = ""
+    targets = []
     try:
         payload = request.get_json(force=True, silent=False) or {}
+        account = str(payload.get("account") or "").strip()
+        session_id = str(payload.get("session_id") or "").strip()
+        page_url = str(payload.get("page_url") or "").strip()
         image_b64 = payload.get("image")
         targets = normalize_targets(payload.get("target") or [])
 
         image_bytes = decode_base64_image(image_b64)
+        emit_event(
+            "ocr-server",
+            "ocr_request",
+            account=account,
+            session_id=session_id,
+            page_url=page_url,
+            detail={"target": targets},
+        )
         words, debug = detect_characters(image_bytes, targets)
         click_points = build_click_points(words, targets)
         request_id = time.strftime("%Y%m%d-%H%M%S") + f"-{int((time.time() % 1) * 1000):03d}"
@@ -698,6 +995,24 @@ def ocr_click():
             },
         }
 
+        emit_event(
+            "ocr-server",
+            "ocr_success",
+            account=account,
+            session_id=session_id,
+            page_url=page_url,
+            detail={
+                "request_id": request_id,
+                "target": targets,
+                "recognized_count": len(words),
+                "click_count": len(click_points),
+                "elapsed_ms": response["elapsed_ms"],
+                "raw_box_count": debug["raw_box_count"],
+                "merged_box_count": debug["merged_box_count"],
+                "filtered_count": debug["filtered_count"],
+            },
+        )
+
         if SAVE_DEBUG:
             save_debug_bytes(f"{request_id}_source.png", image_bytes)
             save_debug_json(
@@ -718,6 +1033,18 @@ def ocr_click():
 
         return jsonify(response)
     except Exception as exc:
+        emit_event(
+            "ocr-server",
+            "ocr_failure",
+            account=account,
+            session_id=session_id,
+            page_url=page_url,
+            detail={
+                "target": targets,
+                "elapsed_ms": int((time.time() - started_at) * 1000),
+                "message": str(exc),
+            },
+        )
         return jsonify({"success": False, "code": -1, "message": str(exc)}), 500
 
 

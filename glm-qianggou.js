@@ -28,8 +28,22 @@
   window.__autoGlmSimple16Initialized = true;
 
   const OCR_API_URL = "http://127.0.0.1:5000/ocr/click";
+  const LOG_API_URL = "http://127.0.0.1:5000/log/event";
   const OCR_API_TIMEOUT = 8000;
+  const LOG_API_TIMEOUT = 3000;
   const CAPTCHA_EXPECTED_TARGET_COUNT = 3;
+  const WINDOW_RANDOM_ID = Math.random().toString(36).slice(2, 8);
+
+  function getAccountLabel() {
+    const accountNode = document.querySelector(".user-dropdown-menu .inner-link");
+    const rawText = (accountNode?.textContent || "").trim();
+    if (!rawText) return "unknown";
+    return rawText.replace(/\s+/g, " ").replace(/[\\/:*?"<>|]/g, "_").slice(0, 80);
+  }
+
+  function getWindowSessionId() {
+    return `${getAccountLabel()}-${WINDOW_RANDOM_ID}`;
+  }
 
   // ==========================================
   // 网络拦截层
@@ -305,6 +319,44 @@
     );
   }
 
+  function safeStringify(value) {
+    try {
+      return JSON.stringify(value);
+    } catch (error) {
+      return JSON.stringify({
+        message: "stringify_failed",
+        error: error?.message || String(error),
+      });
+    }
+  }
+
+  function sendStructuredLog(eventType, detail = {}) {
+    const account = getAccountLabel();
+    const payload = {
+      account,
+      session_id: getWindowSessionId(),
+      event_type: eventType,
+      page_url: location.href,
+      detail,
+    };
+
+    console.log("[Auto-GLM-EVENT]", payload);
+    GM_xmlhttpRequest({
+      method: "POST",
+      url: LOG_API_URL,
+      headers: { "Content-Type": "application/json" },
+      timeout: LOG_API_TIMEOUT,
+      data: safeStringify(payload),
+      onload: () => {},
+      ontimeout: () => {
+        console.warn("[Auto-GLM-EVENT] 日志服务超时:", eventType);
+      },
+      onerror: () => {
+        console.warn("[Auto-GLM-EVENT] 日志服务连接失败:", eventType);
+      },
+    });
+  }
+
   function isElementVisible(el) {
     if (!el || !el.isConnected) return false;
     const style = window.getComputedStyle(el);
@@ -478,6 +530,9 @@
           headers: { "Content-Type": "application/json" },
           timeout: OCR_API_TIMEOUT,
           data: JSON.stringify({
+            account: getAccountLabel(),
+            session_id: getWindowSessionId(),
+            page_url: location.href,
             image: imgBase64,
             target: targets,
           }),
@@ -543,7 +598,22 @@
               return fallbackPoints;
             })();
 
+      sendStructuredLog("ocr_result_received", {
+        targetCount: targets.length,
+        recognizedCount: words.length,
+        clickPointCount: orderedPoints.length,
+        targets,
+        clickTexts: orderedPoints.map((point) => point.text),
+        isThreeChars: orderedPoints.length === CAPTCHA_EXPECTED_TARGET_COUNT,
+      });
+
       if (orderedPoints.length !== CAPTCHA_EXPECTED_TARGET_COUNT) {
+        sendStructuredLog("ocr_result_not_3", {
+          expectedCount: CAPTCHA_EXPECTED_TARGET_COUNT,
+          actualCount: orderedPoints.length,
+          targets,
+          clickTexts: orderedPoints.map((point) => point.text),
+        });
         console.warn(
           `[OCR] 识别结果不是 ${CAPTCHA_EXPECTED_TARGET_COUNT} 个字，实际为 ${orderedPoints.length}，关闭验证码`,
         );
@@ -568,6 +638,10 @@
       if (clickedCount === CAPTCHA_EXPECTED_TARGET_COUNT) {
         await new Promise((r) => setTimeout(r, 250));
         submitCaptchaSelection();
+        sendStructuredLog("ocr_submit", {
+          clickedCount,
+          targets,
+        });
         captchaActionState.stage = "submitted";
         return true;
       }
@@ -577,6 +651,9 @@
       return false;
     } catch (error) {
       captchaActionState.stage = "idle";
+      sendStructuredLog("ocr_request_failed", {
+        message: error?.message || String(error),
+      });
       console.error("[OCR] 过程出错:", error);
       return false;
     }
@@ -617,6 +694,11 @@
         wrapper.querySelector(".confirm-pay-btn");
 
       if (isPayDialog) {
+        const hasQrCode = Boolean(
+          wrapper.querySelector(
+            ".scan-code-box img, .scan-code-box canvas, .qrcode img, .qrcode canvas, [class*='qrcode'] img, [class*='qrcode'] canvas",
+          ),
+        );
         let hasRealPrice = false;
 
         // 策略A：检测 .price-item 包含数字
@@ -644,8 +726,16 @@
         }
 
         if (hasRealPrice) {
+          if (hasQrCode) {
+            return {
+              type: "qr-pay",
+              hasQrCode: true,
+              closeBtn: wrapper.querySelector(".el-dialog__headerbtn"),
+            };
+          }
           return {
             type: "success-pay",
+            hasQrCode,
             closeBtn: wrapper.querySelector(".el-dialog__headerbtn"),
           };
         }
@@ -653,6 +743,7 @@
         if (wrapper.querySelector(".confirm-pay-btn")) {
           return {
             type: "confirm-pay",
+            hasQrCode,
             closeBtn: wrapper.querySelector(".el-dialog__headerbtn"),
           };
         }
@@ -660,6 +751,7 @@
         // 走到这一步说明弹出了购买框，但是金额里没内容
         return {
           type: "empty-price",
+          hasQrCode,
           closeBtn: wrapper.querySelector(".el-dialog__headerbtn"),
         };
       }
@@ -1055,6 +1147,9 @@
     if (isWaitingCaptcha) {
       if (isCaptchaVisible()) {
         updateStatus("检测到验证码，尝试 OCR 识别");
+        sendStructuredLog("captcha_detected", {
+          stage: "waiting",
+        });
         await solveCaptchaViaOCR();
         if (isCaptchaVisible()) {
           scheduleNextTick(1000);
@@ -1078,10 +1173,34 @@
       const dialogState = detectDialogState();
 
       if (dialogState) {
+        if (dialogState.type === "busy") {
+          sendStructuredLog("dialog_busy", { retryCount });
+        }
+        if (dialogState.type === "empty-price") {
+          sendStructuredLog("dialog_empty_price", {
+            retryCount,
+            hasQrCode: Boolean(dialogState.hasQrCode),
+          });
+        }
+        if (dialogState.type === "confirm-pay") {
+          sendStructuredLog("dialog_confirm_pay", {
+            hasQrCode: Boolean(dialogState.hasQrCode),
+          });
+        }
+        if (dialogState.type === "qr-pay") {
+          sendStructuredLog("dialog_qr_pay", {
+            hasQrCode: true,
+          });
+        }
         if (
           dialogState.type === "success-pay" ||
-          dialogState.type === "confirm-pay"
+          dialogState.type === "confirm-pay" ||
+          dialogState.type === "qr-pay"
         ) {
+          sendStructuredLog("purchase_completed", {
+            dialogType: dialogState.type,
+            hasQrCode: Boolean(dialogState.hasQrCode),
+          });
           log(`🎉 检测到真实的支付弹窗(${dialogState.type})，停止重试流程！`);
           updateStatus("抢购完成(弹出支付)");
           hasCompleted = true;
@@ -1112,6 +1231,9 @@
     if (isCaptchaVisible()) {
       isWaitingCaptcha = true;
       log("⚠ 检测到图片验证码，脚本切换到 OCR 处理模式");
+      sendStructuredLog("captcha_detected", {
+        stage: "detected",
+      });
       updateStatus("等待 OCR 验证");
       scheduleNextTick(500);
       return;
@@ -1193,6 +1315,11 @@
 
     const ts = `${config.targetHour}:${String(config.targetMinute).padStart(2, "0")}:${String(config.targetSecond || 0).padStart(2, "0")}`;
     log(`开始闭环监听，目标时间: ${ts}`);
+    sendStructuredLog("watch_start", {
+      plan: config.targetPlan,
+      cycle: config.billingCycle,
+      targetTime: ts,
+    });
     updateStatus(getIdleStatusText());
     scheduleNextTick(0);
   }
@@ -1259,7 +1386,7 @@
     panel.id = "glm-simple-panel-v16";
     panel.innerHTML = `
       <div class="glm-simple-head-v16">
-         <div class="glm-simple-title-v16">GLM 抢购助手 <span class="glm-simple-badge-v16">v1.6</span></div>
+         <div class="glm-simple-title-v16">GLM 抢购助手 <span class="glm-simple-badge-v16">v1.7</span></div>
       </div>
       <div class="glm-simple-body-v16">
         <div class="glm-simple-row-v16">
@@ -1336,6 +1463,10 @@
     injectStyles();
     buildPanel();
     updateStatus("准备就绪");
+    sendStructuredLog("page_enter", {
+      title: document.title,
+      userAgent: navigator.userAgent,
+    });
     log("脚本引擎加载完毕 v1.7 (ddddocr)");
   }
 
