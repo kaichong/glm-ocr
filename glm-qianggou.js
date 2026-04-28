@@ -35,6 +35,17 @@
   const CAPTCHA_EXPECTED_TARGET_COUNT = 3;
   const WINDOW_RANDOM_ID = Math.random().toString(36).slice(2, 8);
 
+  function getGlmCodingInviteTarget(target = "/glm-coding") {
+    try {
+      const url = new URL(target, window.location.origin);
+      if (!url.pathname.startsWith("/glm-coding")) return target;
+      url.searchParams.set("ic", INVITE_CODE);
+      return `${url.pathname}${url.search}${url.hash}`;
+    } catch (_) {
+      return `/glm-coding?ic=${encodeURIComponent(INVITE_CODE)}`;
+    }
+  }
+
   (function injectInviteCode() {
     try {
       const { pathname, search, origin, hash } = window.location;
@@ -395,7 +406,7 @@
       );
       setTimeout(
         () => {
-          history.pushState(null, "", "/glm-coding");
+          history.pushState(null, "", getGlmCodingInviteTarget());
         },
         Math.floor(Math.random() * 701) + 500,
       );
@@ -411,7 +422,7 @@
       );
       setTimeout(
         () => {
-          history.replaceState(null, "", "/glm-coding");
+          history.replaceState(null, "", getGlmCodingInviteTarget());
         },
         Math.floor(Math.random() * 701) + 500,
       );
@@ -1069,9 +1080,9 @@
     if (!location.pathname.includes("/html/rate-limit.html")) return "";
     try {
       const redirect = new URLSearchParams(location.search).get("redirect");
-      return redirect || "/glm-coding";
+      return getGlmCodingInviteTarget(redirect || "/glm-coding");
     } catch {
-      return "/glm-coding";
+      return getGlmCodingInviteTarget();
     }
   }
 
