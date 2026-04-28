@@ -25,188 +25,230 @@
   if (window.__autoGlmSimple16Initialized) return;
   window.__autoGlmSimple16Initialized = true;
 
+  const INVITE_CODE = "HSOWBABFLO";
+
   const OCR_API_URL = "http://127.0.0.1:5000/ocr/click";
-  let originalFetch = null;  // 用于时间校准获取真实时间
+  let originalFetch = null; // 用于时间校准获取真实时间
   const LOG_API_URL = "http://127.0.0.1:5000/log/event";
   const OCR_API_TIMEOUT = 8000;
   const LOG_API_TIMEOUT = 3000;
   const CAPTCHA_EXPECTED_TARGET_COUNT = 3;
   const WINDOW_RANDOM_ID = Math.random().toString(36).slice(2, 8);
 
+  (function injectInviteCode() {
+    try {
+      const { pathname, search, origin, hash } = window.location;
+      if (!pathname.startsWith("/glm-coding")) return;
+
+      const params = new URLSearchParams(search);
+      if (params.get("ic") === INVITE_CODE) return;
+
+      params.set("ic", INVITE_CODE);
+      const targetUrl = `${origin}${pathname}?${params.toString()}${hash}`;
+      window.history.replaceState(null, "", targetUrl);
+
+      if (
+        document.readyState === "complete" &&
+        !sessionStorage.getItem("glm_ic_injected")
+      ) {
+        sessionStorage.setItem("glm_ic_injected", "1");
+        location.replace(targetUrl);
+      }
+    } catch (_) {
+      /* 静默失败，不影响主流程 */
+    }
+  })();
+
   // ==========================================
   // 时间校准模块
   // ==========================================
-  
+
   const TIME_SYNC = {
-    offset: 0,                    // 本地时间与服务器时间的偏差 (serverTime = localTime + offset)
-    lastSyncTime: 0,              // 上次同步时间戳
-    syncIntervalMs: 60 * 1000,    // 每60秒同步一次
-    isSynced: false,              // 是否已成功同步过
-    source: null,                 // 当前时间源: 'website' | 'ntp'
-    
+    offset: 0, // 本地时间与服务器时间的偏差 (serverTime = localTime + offset)
+    lastSyncTime: 0, // 上次同步时间戳
+    syncIntervalMs: 60 * 1000, // 每60秒同步一次
+    isSynced: false, // 是否已成功同步过
+    source: null, // 当前时间源: 'website' | 'ntp'
+
     // 获取校正后的当前时间
-    now: function() {
+    now: function () {
       return Date.now() + this.offset;
     },
-    
+
     // 获取距离目标时间的剩余毫秒数 (使用校正后时间)
-    getRemainingMs: function(targetTimestamp) {
+    getRemainingMs: function (targetTimestamp) {
       return targetTimestamp - this.now();
     },
-    
+
     // 获取距离目标时间的格式化倒计时
-    getCountdown: function(targetTimestamp) {
+    getCountdown: function (targetTimestamp) {
       const diff = this.getRemainingMs(targetTimestamp);
       if (diff <= 0) return null;
       const h = Math.floor(diff / (1000 * 60 * 60));
       const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
       const s = Math.floor((diff % (1000 * 60)) / 1000);
-      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
     },
-    
+
     // 方式1: 从网站获取服务器时间 (使用原始fetch避免被拦截)
-    syncFromWebsite: async function() {
+    syncFromWebsite: async function () {
       try {
         // 使用 originalFetch 避免被脚本拦截，获取真实的服务器时间
         const startTime = Date.now();
-        const response = await originalFetch('https://www.bigmodel.cn/');
-        
+        const response = await originalFetch("https://www.bigmodel.cn/");
+
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
-        
+
         // 从响应头获取服务器时间
-        const dateHeader = response.headers.get('Date');
+        const dateHeader = response.headers.get("Date");
         if (!dateHeader) {
-          throw new Error('响应中没有 Date 头');
+          throw new Error("响应中没有 Date 头");
         }
-        
+
         const serverTime = new Date(dateHeader).getTime();
         if (isNaN(serverTime)) {
-          throw new Error('Date 头解析失败');
+          throw new Error("Date 头解析失败");
         }
-        
+
         // 用往返时间的一半作为延迟补偿
         const endTime = Date.now();
         const roundTrip = endTime - startTime;
         const localTime = startTime + roundTrip / 2;
         const newOffset = serverTime - localTime;
-        
-        console.log(`[TimeSync] 网站时间同步成功: offset=${newOffset.toFixed(0)}ms, serverTime=${new Date(serverTime).toLocaleString()}`);
-        return { success: true, offset: newOffset, source: 'website', serverTime };
-        
+
+        console.log(
+          `[TimeSync] 网站时间同步成功: offset=${newOffset.toFixed(0)}ms, serverTime=${new Date(serverTime).toLocaleString()}`,
+        );
+        return {
+          success: true,
+          offset: newOffset,
+          source: "website",
+          serverTime,
+        };
       } catch (error) {
         console.warn(`[TimeSync] 网站时间同步失败: ${error.message}`);
         return { success: false, error: error.message };
       }
     },
-    
+
     // 方式2: 从大网站获取时间 (直接从响应头Date取)
-    syncFromBackupSite: async function() {
+    syncFromBackupSite: async function () {
       try {
         // 使用国内大网站，它们的服务器时间非常准确
         const backupSites = [
-          'https://www.baidu.com/',
-          'https://www.taobao.com/',
+          "https://www.baidu.com/",
+          "https://www.taobao.com/",
         ];
-        
+
         for (const url of backupSites) {
           try {
             const startTime = Date.now();
-            const response = await fetch(url, { 
-              cache: 'no-cache',
-              mode: 'cors'
+            const response = await fetch(url, {
+              cache: "no-cache",
+              mode: "cors",
             });
-            
+
             if (!response.ok) continue;
-            
+
             const endTime = Date.now();
-            
+
             // 直接从响应头取 Date
-            const dateHeader = response.headers.get('Date');
+            const dateHeader = response.headers.get("Date");
             if (!dateHeader) continue;
-            
+
             const serverTime = new Date(dateHeader).getTime();
             if (isNaN(serverTime)) continue;
-            
+
             // 用往返时间的一半作为延迟补偿
             const roundTrip = endTime - startTime;
             const localTime = startTime + roundTrip / 2;
             const newOffset = serverTime - localTime;
-            
-            console.log(`[TimeSync] 备用网站时间同步成功: source=${url}, offset=${newOffset.toFixed(0)}ms`);
-            return { success: true, offset: newOffset, source: 'backup', serverTime };
-            
+
+            console.log(
+              `[TimeSync] 备用网站时间同步成功: source=${url}, offset=${newOffset.toFixed(0)}ms`,
+            );
+            return {
+              success: true,
+              offset: newOffset,
+              source: "backup",
+              serverTime,
+            };
           } catch (e) {
             console.warn(`[TimeSync] 备用网站 ${url} 失败: ${e.message}`);
             continue;
           }
         }
-        
-        throw new Error('所有备用网站都失败');
-        
+
+        throw new Error("所有备用网站都失败");
       } catch (error) {
         console.warn(`[TimeSync] 备用网站时间同步失败: ${error.message}`);
         return { success: false, error: error.message };
       }
     },
-    
+
     // 综合同步: 优先网站，失败则备用网站
-    sync: async function() {
+    sync: async function () {
       // 优先尝试目标网站时间
       let result = await this.syncFromWebsite();
-      
+
       // 如果网站失败，尝试备用网站(百度/淘宝)
       if (!result.success) {
-        console.log('[TimeSync] 目标网站时间不可用，尝试备用网站...');
+        console.log("[TimeSync] 目标网站时间不可用，尝试备用网站...");
         result = await this.syncFromBackupSite();
       }
-      
+
       if (result.success) {
         this.offset = result.offset;
         this.lastSyncTime = Date.now();
         this.isSynced = true;
         this.source = result.source;
-        
+
         // 上报到日志系统
-        sendStructuredLog('time_sync', {
+        sendStructuredLog("time_sync", {
           offset: result.offset,
           source: result.source,
-          serverTime: result.serverTime
+          serverTime: result.serverTime,
         });
-        
+
         return { success: true, ...result };
       }
-      
-      return { success: false, error: '所有时间源都不可用' };
+
+      return { success: false, error: "所有时间源都不可用" };
     },
-    
+
     // 检查是否需要同步
-    needsSync: function() {
-      return !this.isSynced || (Date.now() - this.lastSyncTime > this.syncIntervalMs);
+    needsSync: function () {
+      return (
+        !this.isSynced || Date.now() - this.lastSyncTime > this.syncIntervalMs
+      );
     },
-    
+
     // 获取状态信息
-    getStatus: function() {
+    getStatus: function () {
       return {
         isSynced: this.isSynced,
         source: this.source,
         offset: this.offset,
         lastSyncTime: this.lastSyncTime,
-        nextSyncIn: Math.max(0, this.syncIntervalMs - (Date.now() - this.lastSyncTime))
+        nextSyncIn: Math.max(
+          0,
+          this.syncIntervalMs - (Date.now() - this.lastSyncTime),
+        ),
       };
-    }
+    },
   };
 
   // 后台定期同步时间 (每60秒检查一次)
   async function startTimeSyncLoop() {
     // 延迟一下确保页面加载完成
-    await new Promise(r => setTimeout(r, 1000));
-    
+    await new Promise((r) => setTimeout(r, 1000));
+
     // 首次同步
     const result = await TIME_SYNC.sync();
     if (!result.success && !TIME_SYNC.isSynced) {
-      console.warn('[TimeSync] 首次同步失败，将在下次检查时重试');
+      console.warn("[TimeSync] 首次同步失败，将在下次检查时重试");
       // 稍后重试一次
       setTimeout(async () => {
         if (TIME_SYNC.needsSync()) {
@@ -214,21 +256,26 @@
         }
       }, 10000);
     }
-    
+
     // 定时检查
     setInterval(async () => {
       if (TIME_SYNC.needsSync()) {
-        console.log('[TimeSync] 开始定时同步...');
+        console.log("[TimeSync] 开始定时同步...");
         await TIME_SYNC.sync();
       }
     }, 30000); // 每30秒检查一次
   }
 
   function getAccountLabel() {
-    const accountNode = document.querySelector(".user-dropdown-menu .inner-link");
+    const accountNode = document.querySelector(
+      ".user-dropdown-menu .inner-link",
+    );
     const rawText = (accountNode?.textContent || "").trim();
     if (!rawText) return "unknown";
-    return rawText.replace(/\s+/g, " ").replace(/[\\/:*?"<>|]/g, "_").slice(0, 80);
+    return rawText
+      .replace(/\s+/g, " ")
+      .replace(/[\\/:*?"<>|]/g, "_")
+      .slice(0, 80);
   }
 
   function getWindowSessionId() {
@@ -241,7 +288,7 @@
 
   // 保存原始 fetch，后续用于时间校准
   originalFetch = window.fetch;
-  
+
   // 1. 绕过限流接口
   window.fetch = async function (...args) {
     const [input] = args;
@@ -464,7 +511,9 @@
         return;
       }
 
-      const center = getBoxCenter(item.box ?? item.bbox ?? item.rect ?? item.points);
+      const center = getBoxCenter(
+        item.box ?? item.bbox ?? item.rect ?? item.points,
+      );
       if (center) {
         candidates.push({ text, x: center.x, y: center.y });
       }
@@ -575,11 +624,12 @@
       if (isElementVisible(el)) return el;
     }
 
-    return Array.from(root.querySelectorAll("button, span, i, div"))
-      .find((el) => {
+    return (
+      Array.from(root.querySelectorAll("button, span, i, div")).find((el) => {
         const text = `${el.textContent || ""} ${el.getAttribute?.("aria-label") || ""} ${el.getAttribute?.("title") || ""}`;
         return /关闭|取消|×|✕|✖/.test(text) && isElementVisible(el);
-      }) || null;
+      }) || null
+    );
   }
 
   function findCaptchaConfirmButton() {
@@ -597,7 +647,8 @@
 
     for (const selector of selectorCandidates) {
       const matched = Array.from(root.querySelectorAll(selector)).find((el) => {
-        const text = `${el.textContent || ""} ${el.getAttribute?.("aria-label") || ""}`.trim();
+        const text =
+          `${el.textContent || ""} ${el.getAttribute?.("aria-label") || ""}`.trim();
         return /确定|确认|提交|完成|验证/.test(text) && isElementVisible(el);
       });
       if (matched) return matched;
@@ -690,7 +741,9 @@
 
       if (targets.length !== CAPTCHA_EXPECTED_TARGET_COUNT) {
         captchaActionState.stage = "closed";
-        closeCaptchaPopup(`目标字数不是 ${CAPTCHA_EXPECTED_TARGET_COUNT}，实际为 ${targets.length}`);
+        closeCaptchaPopup(
+          `目标字数不是 ${CAPTCHA_EXPECTED_TARGET_COUNT}，实际为 ${targets.length}`,
+        );
         return false;
       }
 
@@ -757,7 +810,15 @@
       }
 
       const words = normalizeDdddocrResult(response);
-      console.log("[OCR] 识别结果:", words.map((w) => `"${w.text}"@(${Number(w.x).toFixed(0)},${Number(w.y).toFixed(0)})`).join(", "));
+      console.log(
+        "[OCR] 识别结果:",
+        words
+          .map(
+            (w) =>
+              `"${w.text}"@(${Number(w.x).toFixed(0)},${Number(w.y).toFixed(0)})`,
+          )
+          .join(", "),
+      );
 
       if (words.length === 0 && clickPoints.length === 0) {
         console.warn("[OCR] 未能识别到任何文字");
@@ -820,7 +881,9 @@
         const x = point.x * scaleX;
         const y = point.y * scaleY;
 
-        console.log(`[OCR] 点击字符 "${point.text}" 于 (${x.toFixed(0)}, ${y.toFixed(0)})`);
+        console.log(
+          `[OCR] 点击字符 "${point.text}" 于 (${x.toFixed(0)}, ${y.toFixed(0)})`,
+        );
         await simulateSmartClick(bgDiv, x, y);
         await new Promise((r) => setTimeout(r, 200));
         clickedCount++;
@@ -961,24 +1024,28 @@
 
   function updateSyncStatus() {
     const syncText = document.getElementById("glm-simple-sync-text-v16");
-    const syncIndicator = document.getElementById("glm-simple-sync-indicator-v16");
+    const syncIndicator = document.getElementById(
+      "glm-simple-sync-indicator-v16",
+    );
     const syncSource = document.getElementById("glm-simple-sync-source-v16");
-    
+
     if (!syncText || !syncIndicator || !syncSource) return;
-    
+
     const status = TIME_SYNC.getStatus();
-    
+
     if (status.isSynced) {
-      const offsetDisplay = Math.abs(status.offset) < 1000 
-        ? `${status.offset >= 0 ? '+' : ''}${status.offset.toFixed(0)}ms`
-        : `${(status.offset / 1000).toFixed(2)}s`;
+      const offsetDisplay =
+        Math.abs(status.offset) < 1000
+          ? `${status.offset >= 0 ? "+" : ""}${status.offset.toFixed(0)}ms`
+          : `${(status.offset / 1000).toFixed(2)}s`;
       syncText.textContent = `时间已校准 (偏差 ${offsetDisplay})`;
-      syncIndicator.className = 'sync-indicator synced';
-      syncSource.textContent = status.source === 'website' ? '网站时间' : 'NTP时间';
+      syncIndicator.className = "sync-indicator synced";
+      syncSource.textContent =
+        status.source === "website" ? "网站时间" : "NTP时间";
     } else {
-      syncText.textContent = '时间校准中...';
-      syncIndicator.className = 'sync-indicator syncing';
-      syncSource.textContent = '--';
+      syncText.textContent = "时间校准中...";
+      syncIndicator.className = "sync-indicator syncing";
+      syncSource.textContent = "--";
     }
   }
 
@@ -1696,11 +1763,11 @@
     injectStyles();
     buildPanel();
     updateStatus("准备就绪");
-    
+
     // 启动时间同步
     startTimeSyncLoop();
     startSyncStatusLoop();
-    
+
     sendStructuredLog("page_enter", {
       title: document.title,
       userAgent: navigator.userAgent,
